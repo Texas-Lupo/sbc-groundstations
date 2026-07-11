@@ -74,36 +74,42 @@ list_wifi_channels() {
     iw list | grep MHz | grep -v disabled | grep -v "radar detection" | grep \* | tr -d '[]' | awk '{print $4 " (" $2 " " $3 ")"}' | grep '^[1-9]' | sort -n | uniq | head -c -1
 }
 
+# Remove the network stanza for <ssid> from wpa_supplicant.conf (no-op if absent).
+wpa_conf_remove_network() {
+    local ssid="$1"
+    local conf="/etc/wpa_supplicant.conf"
+    local tmpfile
+    [ -f "$conf" ] || return 0
+    tmpfile=$(mktemp)
+    awk -v ssid="$ssid" '
+        /network=\{/ { in_block=1; block="" }
+        in_block { block = block $0 "\n" }
+        in_block && /\}/ {
+            if (index(block, "ssid=\"" ssid "\"") == 0)
+                printf "%s", block
+            in_block=0; block=""
+            next
+        }
+        !in_block { print }
+    ' "$conf" > "$tmpfile"
+    mv "$tmpfile" "$conf"
+}
+
 # Add or update a network stanza in wpa_supplicant.conf.
 # Usage: wpa_conf_update_network <ssid> <psk>  (psk may be empty for open networks)
 wpa_conf_update_network() {
     local ssid="$1"
     local psk="$2"
     local conf="/etc/wpa_supplicant.conf"
-    local tmpfile
-    tmpfile=$(mktemp)
 
-    # Remove any existing stanza for this SSID, then append the updated one
-    if [ -f "$conf" ]; then
-        awk -v ssid="$ssid" '
-            /network=\{/ { in_block=1; block="" }
-            in_block { block = block $0 "\n" }
-            in_block && /\}/ {
-                if (index(block, "ssid=\"" ssid "\"") == 0)
-                    printf "%s", block
-                in_block=0; block=""
-                next
-            }
-            !in_block { print }
-        ' "$conf" > "$tmpfile"
-    fi
+    # Drop any existing stanza for this SSID, then append the updated one
+    wpa_conf_remove_network "$ssid"
 
     if [ -z "$psk" ]; then
-        printf 'network={\n    ssid="%s"\n    key_mgmt=NONE\n}\n' "$ssid" >> "$tmpfile"
+        printf 'network={\n    ssid="%s"\n    key_mgmt=NONE\n}\n' "$ssid" >> "$conf"
     else
-        printf 'network={\n    ssid="%s"\n    psk="%s"\n}\n' "$ssid" "$psk" >> "$tmpfile"
+        printf 'network={\n    ssid="%s"\n    psk="%s"\n}\n' "$ssid" "$psk" >> "$conf"
     fi
-    mv "$tmpfile" "$conf"
 }
 
 send_cmd() {
@@ -690,6 +696,10 @@ case "$@" in
         echo $PIXELPILOT_VIDEO_SCALE
         emit_values "0.5 1.0"
         ;;
+    "get gs system gs_live_colortrans")
+        . /etc/default/pixelpilot
+        [ x$PIXELPILOT_LIVE_COLORTRANS = x"" ] && echo 0 || echo 1
+        ;;
     "get gs system rec_fps")
         . /etc/default/pixelpilot
         echo $PIXELPILOT_DVR_FRAMERATE
@@ -725,17 +735,15 @@ case "$@" in
         echo $PIXELPILOT_DVR_BITRATE
         emit_values "5000\n10000\n15000\n20000\n25000\n30000\n35000\n40000\n45000\n50000"
         ;;
-
+    "get gs system rec_enabled"*)
+        echo 0
+        ;;
+    "get gs system dvr_osd"*)
+        . /etc/default/pixelpilot
+        [ x$PIXELPILOT_DVR_OSD = x"" ] && echo 0 || echo 1
+        ;;
     "set gs system rx_codec"*)
         sed -i "s/^PIXELPILOT_CODEC=.*/PIXELPILOT_CODEC=\"$5\"/" /etc/default/pixelpilot
-        ;;
-    "set gs system gs_live_colortrans"*)
-        if [ "$5" = "on" ]
-        then
-            sed -i "s/^PIXELPILOT_LIVE_COLORTRANS=.*/PIXELPILOT_LIVE_COLORTRANS=\"--live-colortrans\"/" /etc/default/pixelpilot
-        else
-            sed -i "s/^PIXELPILOT_LIVE_COLORTRANS=.*/PIXELPILOT_LIVE_COLORTRANS=\"\"/" /etc/default/pixelpilot
-        fi
         ;;
     "set gs system rx_mode"*)
         EXCLUDE_IFACE="wlan0"
@@ -796,21 +804,23 @@ EOF
             /etc/init.d/S98msposd start
         fi
         ;;
-    "set gs system gs_live_colortrans"*)
-        if [ "$5" = "on" ]; then
-            sed -i "s/^PIXELPILOT_LIVE_COLORTRANS=.*/PIXELPILOT_LIVE_COLORTRANS=\"--live-colortrans\"/" /etc/default/pixelpilot
-        else
-            sed -i "s/^PIXELPILOT_LIVE_COLORTRANS=.*/PIXELPILOT_LIVE_COLORTRANS=\"\"/" /etc/default/pixelpilot
-        fi
-        ;;
+    "set gs system connector"*)             : ;;
     "set gs system resolution"*)
         sed -i "s/^PIXELPILOT_SCREEN_MODE=.*/PIXELPILOT_SCREEN_MODE=\"$5\"/" /etc/default/pixelpilot
         ;;
     "set gs system video_scale"*)
         sed -i "s/^PIXELPILOT_VIDEO_SCALE=.*/PIXELPILOT_VIDEO_SCALE=$5/" /etc/default/pixelpilot
         ;;
+    "set gs system gs_live_colortrans"*)
+        if [ "$5" = "on" ]
+        then
+            sed -i "s/^PIXELPILOT_LIVE_COLORTRANS=.*/PIXELPILOT_LIVE_COLORTRANS=\"--live-colortrans\"/" /etc/default/pixelpilot
+        else
+            sed -i "s/^PIXELPILOT_LIVE_COLORTRANS=.*/PIXELPILOT_LIVE_COLORTRANS=\"\"/" /etc/default/pixelpilot
+        fi
+        ;;
     "set gs system rec_fps"*)
-        sed -i "s/^PIXELPILOT_DVR_FRAMERATE=.*/PIXELPILOT_DVR_FRAMERATE=$5/" /etc/default/pixelpilot
+        sed -i "s/^PIXELPILOT_DVR_FRAMERATE=.*/PIXELPILOT_DVR_FRAMERATE=\"$5\"/" /etc/default/pixelpilot
         ;;
     "set gs system rec_enabled"*)
         if [ "$5" = "off" ]; then
@@ -1030,7 +1040,19 @@ EOF
         # Remove interfaces entry to disable auto-reconnect at boot
         rm -f /etc/network/interfaces.d/wlan0
         ;;
-
+    "set gs wifi forget"*)
+        # Forget/remove the saved network ($5 = SSID). If it's the network we're
+        # currently on, tear the connection down first (as with disconnect).
+        [ -z "$5" ] && exit 0
+        if [ -d /sys/class/net/wlan0 ]; then
+            current=$(iw dev wlan0 link 2>/dev/null | awk '/SSID:/ { sub(/.*SSID: /, ""); print; exit }')
+            if [ "$current" = "$5" ]; then
+                ifdown wlan0 2>/dev/null || true
+                rm -f /etc/network/interfaces.d/wlan0
+            fi
+        fi
+        wpa_conf_remove_network "$5"
+        ;;
     "set gs wifi wlan"*)
         [ ! -d /sys/class/net/wlan0 ] && exit 0
         if [ "$5" = "on" ]; then
